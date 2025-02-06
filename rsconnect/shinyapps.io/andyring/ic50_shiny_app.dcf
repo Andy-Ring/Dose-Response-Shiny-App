@@ -1,0 +1,10 @@
+name: ic50_shiny_app
+title:
+username: andyring
+account: andyring
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 13929951
+bundleId: 9761186
+url: https://andyring.shinyapps.io/ic50_shiny_app/
+version: 1
