@@ -1,27 +1,43 @@
 # Load required packages
 library(shiny)
+library(bslib)          # For custom Bootstrap theming
 library(ggplot2)
 library(drc)
 library(dplyr)
+library(broom)          # For tidying ANOVA results
+library(thematic)
 
-# Define the UI
+thematic_shiny()
+
+# Helper function to clean group names
+cleanGroupName <- function(name) {
+  # If the name contains colons, assume the desired value is the middle element.
+  if (grepl(":", name)) {
+    parts <- strsplit(name, ":")[[1]]
+    if (length(parts) >= 2) return(trimws(parts[2]))
+    else return(name)
+  }
+  # Otherwise, just trim any whitespace.
+  trimws(name)
+}
+
 ui <- fluidPage(
-  titlePanel("Dose–Response Curve Fitting, IC50 Calculation, and Two-Way ANOVA"),
+  theme = bs_theme(
+    bootswatch = "darkly",
+    secondary = "#BA0C2F",
+    "table-bg" = "primary"  # Custom Google font
+  ),
+  titlePanel("Dose–Response Analysis"),
   sidebarLayout(
     sidebarPanel(
-      # Download CSV template button
+      HTML('<img src="logo.png" width="100%" height="auto">'),
+      br(), br(),
       downloadButton("downloadTemplate", "Download Data Template"),
       tags$hr(),
-      
-      # File input for data
       fileInput("dataFile", "Upload Your Data (CSV)",
                 accept = c("text/csv", "text/comma-separated-values,text/plain", ".csv")),
-      
-      # Display recommendations (based on uploaded data)
       uiOutput("recommendationUI"),
       tags$hr(),
-      
-      # Choose the curve model
       radioButtons("modelChoice", "Select Curve Model:",
                    choices = list("Recommended" = "recommended",
                                   "4-parameter logistic (LL.4)" = "LL.4",
@@ -30,39 +46,41 @@ ui <- fluidPage(
                                   "Linear Model" = "linear"),
                    selected = "recommended"),
       tags$hr(),
-      
-      # Plot customization options
       h4("Plot Customization"),
       textInput("plotTitle", "Plot Title:", value = "Dose–Response Curve"),
       textInput("xLabel", "X Axis Label:", value = "Dose"),
       textInput("yLabel", "Y Axis Label:", value = "Response"),
       checkboxInput("logScale", "Logarithmic Dose Axis", value = FALSE),
+      checkboxInput("sciIC50", "Display IC50 in scientific notation", value = TRUE),
       tags$hr(),
-      
-      # Run analysis button
       actionButton("runAnalysis", "Run Analysis"),
       tags$hr(),
+      tags$p("Created by Andy Ring"),
+      tags$p("Version 1.0.0 | February, 13th 2025")
       
-      # Download buttons for the plot and summary
-      downloadButton("downloadPlot", "Download High-Res Plot"),
-      br(), br(),
-      downloadButton("downloadData", "Download Analysis Summary")
     ),
     mainPanel(
-      plotOutput("doseResponsePlot"),
-      verbatimTextOutput("analysisSummary")
-    )
-  )
-)
+      layout_columns(
+        card(card_header("Dose-Response Plot"), plotOutput("doseResponsePlot")),
+        card(card_header("IC50 Values"), tableOutput("ic50Table")),
+        card(card_header("ANOVA Results"), tableOutput("anovaTable")),
+        downloadButton("downloadPlot", "Download Plot"),
+        downloadButton("downloadData", "Download Analysis Summary"),
+        col_widths = c(12, 4, 8, 4, 4, -4)
+      )
 
-# Define the server logic
+              
+        )
+      )
+    )
+
+
 server <- function(input, output, session) {
   
   #### 1. CSV Template Download ####
   output$downloadTemplate <- downloadHandler(
     filename = function() { "data_template.csv" },
     content = function(file) {
-      # Template columns: Dose (numeric), Response (numeric), and Group (optional)
       template <- data.frame(
         Dose = c(0.1, 0.5, 1, 5, 10),
         Response = rep(NA, 5),
@@ -78,19 +96,13 @@ server <- function(input, output, session) {
     data <- read.csv(input$dataFile$datapath)
     rec <- list()
     
-    # Simple model recommendation: if the dose range is large (>50), use a logistic model; otherwise, linear.
     if("Dose" %in% names(data)) {
       doseRange <- range(data$Dose, na.rm = TRUE)
-      if(diff(doseRange) > 50) {
-        rec$model <- "LL.4"
-      } else {
-        rec$model <- "linear"
-      }
+      rec$model <- if (diff(doseRange) > 50) "LL.4" else "linear"
     } else {
       rec$model <- "LL.4"
     }
     
-    # Recommend two-way ANOVA if a grouping variable exists with more than one level.
     if("Group" %in% names(data) && length(unique(na.omit(data$Group))) > 1) {
       rec$test <- "Two-Way ANOVA (Dose as factor and Group as factor) will be run automatically."
     } else {
@@ -114,7 +126,6 @@ server <- function(input, output, session) {
     req(input$dataFile)
     data <- read.csv(input$dataFile$datapath)
     
-    # Determine which curve model to use.
     selectedModel <- input$modelChoice
     if(selectedModel == "recommended") {
       selectedModel <- recommendations()$model
@@ -122,28 +133,21 @@ server <- function(input, output, session) {
     
     result <- list(data = data, selectedModel = selectedModel)
     
-    # Multiple groups: fit curves per group and run two-way ANOVA.
     if("Group" %in% names(data) && length(unique(na.omit(data$Group))) > 1) {
-      groups <- unique(na.omit(data$Group))
       if(selectedModel %in% c("LL.4", "LL.3", "LL.2")) {
-        fit <- try(
-          drm(Response ~ Dose, curveid = Group, data = data,
-              fct = switch(selectedModel,
-                           "LL.4" = LL.4(),
-                           "LL.3" = LL.3(),
-                           "LL.2" = LL.2())),
-          silent = TRUE)
+        fit <- try(drm(Response ~ Dose, curveid = Group, data = data,
+                       fct = switch(selectedModel,
+                                    "LL.4" = LL.4(),
+                                    "LL.3" = LL.3(),
+                                    "LL.2" = LL.2())),
+                   silent = TRUE)
         if(inherits(fit, "try-error")) {
           result$fit <- NULL
           result$ic50 <- NA
         } else {
           result$fit <- fit
           ed <- try(ED(fit, 50, type = "absolute"), silent = TRUE)
-          if(inherits(ed, "try-error")){
-            result$ic50 <- NA
-          } else {
-            result$ic50 <- ed[,1]  # ED returns a matrix with rows for each group
-          }
+          result$ic50 <- if (inherits(ed, "try-error")) NA else ed[,1]
         }
       } else if(selectedModel == "linear") {
         lmFit <- try(lm(Response ~ Dose * as.factor(Group), data = data), silent = TRUE)
@@ -165,58 +169,49 @@ server <- function(input, output, session) {
             }
             subdata <- data[data$Group == g, ]
             target <- (max(subdata$Response, na.rm = TRUE) + min(subdata$Response, na.rm = TRUE)) / 2
-            ic50_val <- ifelse(slope_val == 0, NA, (target - int_val) / slope_val)
-            ic50s[[g]] <- ic50_val
+            ic50s[[g]] <- ifelse(slope_val == 0, NA, (target - int_val) / slope_val)
           }
           result$ic50 <- ic50s
         }
       }
-      # Run two-way ANOVA (treat Dose as a factor and Group as a factor)
       anovaFit <- aov(Response ~ as.factor(Dose) * as.factor(Group), data = data)
-      result$anovaResult <- summary(anovaFit)
-      result$testResult <- paste(capture.output(result$anovaResult), collapse = "\n")
+      result$anovaModel <- anovaFit
       
     } else {
       ### Single Group Analysis ###
       if(selectedModel %in% c("LL.4", "LL.3", "LL.2")) {
-        fit <- try(
-          drm(Response ~ Dose, data = data,
-              fct = switch(selectedModel,
-                           "LL.4" = LL.4(),
-                           "LL.3" = LL.3(),
-                           "LL.2" = LL.2())),
-          silent = TRUE)
-        if(inherits(fit, "try-error")){
+        fit <- try(drm(Response ~ Dose, data = data,
+                       fct = switch(selectedModel,
+                                    "LL.4" = LL.4(),
+                                    "LL.3" = LL.3(),
+                                    "LL.2" = LL.2())),
+                   silent = TRUE)
+        if(inherits(fit, "try-error")) {
           result$fit <- NULL
           result$ic50 <- NA
         } else {
           result$fit <- fit
           ed <- try(ED(fit, 50, type = "absolute"), silent = TRUE)
-          if(inherits(ed, "try-error")){
-            result$ic50 <- NA
-          } else {
-            result$ic50 <- ed[1,1]
-          }
+          result$ic50 <- if (inherits(ed, "try-error")) NA else ed[1,1]
         }
       } else if(selectedModel == "linear") {
         fit <- try(lm(Response ~ Dose, data = data), silent = TRUE)
-        if(inherits(fit, "try-error")){
+        if(inherits(fit, "try-error")) {
           result$fit <- NULL
           result$ic50 <- NA
         } else {
           result$fit <- fit
           coefs <- coef(fit)
           target <- (max(data$Response, na.rm = TRUE) + min(data$Response, na.rm = TRUE)) / 2
-          ic50_val <- ifelse(coefs["Dose"] == 0, NA, (target - coefs["(Intercept)"]) / coefs["Dose"])
-          result$ic50 <- ic50_val
+          result$ic50 <- ifelse(coefs["Dose"] == 0, NA, (target - coefs["(Intercept)"]) / coefs["Dose"])
         }
       }
-      result$testResult <- "No two-way ANOVA performed (single group data)."
+      result$anovaModel <- NULL
     }
-    return(result)
+    result
   })
   
-  #### 4. Create Plot Object with Mean ± SE and Overlay Fitted Curve(s) ####
+  #### 4. Create Plot Object ####
   plotObject <- reactive({
     req(analysisResults())
     res <- analysisResults()
@@ -228,21 +223,20 @@ server <- function(input, output, session) {
         summarise(meanResponse = mean(Response, na.rm = TRUE),
                   seResponse = sd(Response, na.rm = TRUE) / sqrt(n()),
                   .groups = "drop")
-      
       p <- ggplot(summaryData, aes(x = Dose, y = meanResponse, color = as.factor(Group))) +
         geom_point(size = 3) +
-        geom_errorbar(aes(ymin = meanResponse - seResponse, ymax = meanResponse + seResponse), width = 0.1) +
-        labs(title = input$plotTitle, x = input$xLabel, y = input$yLabel, color = "Group") +
-        theme_light()
-      
-      # Overlay fitted curves if available
+        geom_errorbar(aes(ymin = meanResponse - seResponse, ymax = meanResponse + seResponse),
+                      width = 0.1) +
+        labs(title = input$plotTitle, x = input$xLabel, y = input$yLabel, color = "Group") 
       if(!is.null(res$fit)) {
-        dose_seq <- seq(min(data$Dose, na.rm = TRUE), max(data$Dose, na.rm = TRUE), length.out = 100)
+        dose_seq <- seq(min(data$Dose, na.rm = TRUE), max(data$Dose, na.rm = TRUE),
+                        length.out = 100)
         for(g in unique(data$Group)) {
           newData <- data.frame(Dose = dose_seq, Group = g)
           pred <- predict(res$fit, newdata = newData)
           pred_df <- data.frame(Dose = dose_seq, pred = pred, Group = g)
-          p <- p + geom_line(data = pred_df, aes(x = Dose, y = pred, color = as.factor(Group)), size = 1)
+          p <- p + geom_line(data = pred_df, aes(x = Dose, y = pred, color = as.factor(Group)),
+                             size = 1)
         }
       }
     } else {
@@ -251,73 +245,158 @@ server <- function(input, output, session) {
         summarise(meanResponse = mean(Response, na.rm = TRUE),
                   seResponse = sd(Response, na.rm = TRUE) / sqrt(n()),
                   .groups = "drop")
-      
       p <- ggplot(summaryData, aes(x = Dose, y = meanResponse)) +
         geom_point(size = 3, color = "blue") +
-        geom_errorbar(aes(ymin = meanResponse - seResponse, ymax = meanResponse + seResponse), width = 0.1, color = "blue") +
-        labs(title = input$plotTitle, x = input$xLabel, y = input$yLabel) +
-        theme_light()
-      
-      # Overlay fitted curve if available
+        geom_errorbar(aes(ymin = meanResponse - seResponse, ymax = meanResponse + seResponse),
+                      width = 0.1, color = "blue") +
+        labs(title = input$plotTitle, x = input$xLabel, y = input$yLabel)
       if(!is.null(res$fit)) {
-        dose_seq <- seq(min(data$Dose, na.rm = TRUE), max(data$Dose, na.rm = TRUE), length.out = 100)
+        dose_seq <- seq(min(data$Dose, na.rm = TRUE), max(data$Dose, na.rm = TRUE),
+                        length.out = 100)
         pred <- predict(res$fit, newdata = data.frame(Dose = dose_seq))
         pred_df <- data.frame(Dose = dose_seq, pred = pred)
-        p <- p + geom_line(data = pred_df, aes(x = Dose, y = pred), color = "red", size = 1)
+        p <- p + geom_line(data = pred_df, aes(x = Dose, y = pred),
+                           color = "red", size = 1)
       }
     }
     
-    # Optionally apply logarithmic scale to the Dose axis.
     if(input$logScale) {
       p <- p + scale_x_log10()
     }
-    return(p)
+    p
   })
   
-  #### 5. Render Plot and Analysis Summary ####
   output$doseResponsePlot <- renderPlot({
     plotObject()
   })
   
-  output$analysisSummary <- renderPrint({
+  #### 5. Render IC50 Table ####
+  output$ic50Table <- renderTable({
     req(analysisResults())
     res <- analysisResults()
-    cat("=== Analysis Summary ===\n")
-    cat("Curve Model Used:\n")
-    cat("  ", res$selectedModel, "\n\n")
-    cat("IC50 (ED50) value(s):\n")
-    print(res$ic50)
-    cat("\nTwo-Way ANOVA Results (if applicable):\n")
-    if(!is.null(res$anovaResult)) {
-      cat(res$testResult, "\n")
+    sci <- input$sciIC50
+    
+    if(length(res$ic50) > 1) {
+      groups <- names(res$ic50)
+      if(is.null(groups)) {
+        groups <- paste0("Group ", seq_along(res$ic50))
+      } else {
+        groups <- sapply(groups, cleanGroupName)
+      }
+      df <- data.frame(
+        Group = groups,
+        IC50 = sapply(res$ic50, function(x) {
+          if(is.na(x)) "NA" else format(x, scientific = sci)
+        }),
+        stringsAsFactors = FALSE
+      )
+      df
     } else {
-      cat("No two-way ANOVA performed (single group data).\n")
+      groupName <- if(is.null(names(res$ic50))) "All" else cleanGroupName(names(res$ic50))
+      df <- data.frame(
+        Group = groupName,
+        IC50 = if(is.na(res$ic50)) "NA" else format(res$ic50, scientific = sci),
+        stringsAsFactors = FALSE
+      )
+      df
     }
-  })
+  }, striped = TRUE, hover = TRUE)
   
-  #### 6. Download Handlers ####
-  # Download high-resolution plot as PNG
+  #### 6. Render Cleaned-Up ANOVA Results ####
+  output$anovaTable <- renderTable({
+    req(analysisResults())
+    res <- analysisResults()
+    if(!is.null(res$anovaModel)) {
+      tidy_anova <- tidy(res$anovaModel)
+      tidy_anova$term <- gsub("as.factor\\((.*?)\\)", "\\1", tidy_anova$term)
+      tidy_anova$p.value <- sapply(tidy_anova$p.value, function(x) format(x, scientific = TRUE))
+      tidy_anova
+    } else {
+      data.frame(Message = "No two-way ANOVA performed (single group data).")
+    }
+  }, striped = TRUE, hover = TRUE)
+  
+  #### 7. Download Handlers ####
   output$downloadPlot <- downloadHandler(
     filename = function() { "dose_response_plot.png" },
     content = function(file) {
-      ggsave(file, plot = plotObject(), device = "png", width = 12, height = 8, dpi = 800)
+      req(analysisResults())
+      res <- analysisResults()
+      data <- res$data
+      p <- NULL  # initialize the plot object
+      
+      if ("Group" %in% names(data) && length(unique(na.omit(data$Group))) > 1) {
+        summaryData <- data %>%
+          group_by(Dose, Group) %>%
+          summarise(
+            meanResponse = mean(Response, na.rm = TRUE),
+            seResponse = sd(Response, na.rm = TRUE) / sqrt(n()),
+            .groups = "drop"
+          )
+        p <- ggplot(summaryData, aes(x = Dose, y = meanResponse, color = as.factor(Group))) +
+          geom_point(size = 3) +
+          geom_errorbar(aes(ymin = meanResponse - seResponse, ymax = meanResponse + seResponse),
+                        width = 0.1) +
+          labs(title = input$plotTitle, x = input$xLabel, y = input$yLabel, color = "Group") +
+          theme_light()
+        if (!is.null(res$fit)) {
+          dose_seq <- seq(min(data$Dose, na.rm = TRUE), max(data$Dose, na.rm = TRUE), length.out = 100)
+          for (g in unique(data$Group)) {
+            newData <- data.frame(Dose = dose_seq, Group = g)
+            pred <- predict(res$fit, newdata = newData)
+            pred_df <- data.frame(Dose = dose_seq, pred = pred, Group = g)
+            p <- p + geom_line(data = pred_df, aes(x = Dose, y = pred, color = as.factor(Group)),
+                               size = 1)
+          }
+        }
+      } else {
+        summaryData <- data %>%
+          group_by(Dose) %>%
+          summarise(
+            meanResponse = mean(Response, na.rm = TRUE),
+            seResponse = sd(Response, na.rm = TRUE) / sqrt(n()),
+            .groups = "drop"
+          )
+        p <- ggplot(summaryData, aes(x = Dose, y = meanResponse)) +
+          geom_point(size = 3, color = "blue") +
+          geom_errorbar(aes(ymin = meanResponse - seResponse, ymax = meanResponse + seResponse),
+                        width = 0.1, color = "blue") +
+          labs(title = input$plotTitle, x = input$xLabel, y = input$yLabel) +
+          theme_light()
+        if (!is.null(res$fit)) {
+          dose_seq <- seq(min(data$Dose, na.rm = TRUE), max(data$Dose, na.rm = TRUE), length.out = 100)
+          pred <- predict(res$fit, newdata = data.frame(Dose = dose_seq))
+          pred_df <- data.frame(Dose = dose_seq, pred = pred)
+          p <- p + geom_line(data = pred_df, aes(x = Dose, y = pred),
+                             color = "red", size = 1)
+        }
+      }
+      
+      if (input$logScale) {
+        p <- p + scale_x_log10()
+      }
+      
+      ggsave(file, plot = p, device = "png", width = 12, height = 8, dpi = 800)
     }
   )
   
-  # Download analysis summary as a text file
+  
   output$downloadData <- downloadHandler(
     filename = function() { "analysis_summary.txt" },
     content = function(file) {
       res <- analysisResults()
       sink(file)
       cat("=== Analysis Summary ===\n")
-      cat("Curve Model Used:\n")
-      cat("  ", res$selectedModel, "\n\n")
+      cat("Curve Model Used:\n", res$selectedModel, "\n\n")
       cat("IC50 (ED50) value(s):\n")
       print(res$ic50)
-      cat("\nTwo-Way ANOVA Results (if applicable):\n")
-      if(!is.null(res$anovaResult)) {
-        cat(res$testResult, "\n")
+      cat("\n")
+      if(!is.null(res$anovaModel)) {
+        cat("ANOVA Results:\n")
+        tidy_anova <- tidy(res$anovaModel)
+        tidy_anova$term <- gsub("as.factor\\((.*?)\\)", "\\1", tidy_anova$term)
+        tidy_anova$p.value <- sapply(tidy_anova$p.value, function(x) format(x, scientific = TRUE))
+        print(tidy_anova)
       } else {
         cat("No two-way ANOVA performed (single group data).\n")
       }
@@ -326,8 +405,11 @@ server <- function(input, output, session) {
   )
 }
 
-# Run the application
 shinyApp(ui = ui, server = server)
+
+
+
+
 
 
 

@@ -5,6 +5,8 @@ account: andyring
 server: shinyapps.io
 hostUrl: https://api.shinyapps.io/v1
 appId: 13929951
-bundleId: 9761186
+bundleId: 9796189
 url: https://andyring.shinyapps.io/ic50_shiny_app/
 version: 1
+asMultiple: FALSE
+asStatic: FALSE
