@@ -11,13 +11,11 @@ thematic_shiny()
 
 # Helper function to clean group names
 cleanGroupName <- function(name) {
-  # If the name contains colons, assume the desired value is the middle element.
   if (grepl(":", name)) {
     parts <- strsplit(name, ":")[[1]]
     if (length(parts) >= 2) return(trimws(parts[2]))
     else return(name)
   }
-  # Otherwise, just trim any whitespace.
   trimws(name)
 }
 
@@ -25,17 +23,18 @@ ui <- fluidPage(
   theme = bs_theme(
     bootswatch = "darkly",
     secondary = "#BA0C2F",
-    "table-bg" = "primary"  # Custom Google font
+    "table-bg" = "primary"
   ),
   titlePanel("Dose–Response Analysis"),
   sidebarLayout(
     sidebarPanel(
       HTML('<img src="logo.png" width="100%" height="auto">'),
       br(), br(),
-      downloadButton("downloadTemplate", "Download Data Template"),
-      tags$hr(),
+      # Removed the downloadTemplate button
       fileInput("dataFile", "Upload Your Data (CSV)",
                 accept = c("text/csv", "text/comma-separated-values,text/plain", ".csv")),
+      # UI for selecting which columns to use
+      uiOutput("columnSelectionUI"),
       uiOutput("recommendationUI"),
       tags$hr(),
       radioButtons("modelChoice", "Select Curve Model:",
@@ -56,8 +55,7 @@ ui <- fluidPage(
       actionButton("runAnalysis", "Run Analysis"),
       tags$hr(),
       tags$p("Created by Andy Ring"),
-      tags$p("Version 1.0.0 | February, 13th 2025")
-      
+      tags$p("Version 1.1.0 | March 17th, 2025")
     ),
     mainPanel(
       layout_columns(
@@ -68,32 +66,46 @@ ui <- fluidPage(
         downloadButton("downloadData", "Download Analysis Summary"),
         col_widths = c(12, 4, 8, 4, 4, -4)
       )
-
-              
-        )
-      )
     )
-
+  )
+)
 
 server <- function(input, output, session) {
   
-  #### 1. CSV Template Download ####
-  output$downloadTemplate <- downloadHandler(
-    filename = function() { "data_template.csv" },
-    content = function(file) {
-      template <- data.frame(
-        Dose = c(0.1, 0.5, 1, 5, 10),
-        Response = rep(NA, 5),
-        Group = rep(NA, 5)
-      )
-      write.csv(template, file, row.names = FALSE)
+  # Read the raw CSV data
+  rawData <- reactive({
+    req(input$dataFile)
+    read.csv(input$dataFile$datapath)
+  })
+  
+  # Create a UI to allow the user to choose the columns for dose, response, and group
+  output$columnSelectionUI <- renderUI({
+    req(rawData())
+    data <- rawData()
+    tagList(
+      selectInput("doseColumn", "Select Dose Column:", choices = names(data)),
+      selectInput("responseColumn", "Select Response Column:", choices = names(data)),
+      selectInput("groupColumn", "Select Group Column (if applicable):", 
+                  choices = c("None", names(data)))
+    )
+  })
+  
+  # Process the data by renaming the selected columns to standard names
+  processedData <- reactive({
+    req(rawData(), input$doseColumn, input$responseColumn)
+    data <- rawData()
+    data$Dose <- data[[input$doseColumn]]
+    data$Response <- data[[input$responseColumn]]
+    if (!is.null(input$groupColumn) && input$groupColumn != "None") {
+      data$Group <- data[[input$groupColumn]]
     }
-  )
+    data
+  })
   
   #### 2. Pre-Analysis Recommendations ####
   recommendations <- reactive({
-    req(input$dataFile)
-    data <- read.csv(input$dataFile$datapath)
+    req(processedData())
+    data <- processedData()
     rec <- list()
     
     if("Dose" %in% names(data)) {
@@ -112,7 +124,7 @@ server <- function(input, output, session) {
   })
   
   output$recommendationUI <- renderUI({
-    req(input$dataFile)
+    req(processedData())
     rec <- recommendations()
     tagList(
       h4("Recommendations (Based on Uploaded Data):"),
@@ -123,8 +135,8 @@ server <- function(input, output, session) {
   
   #### 3. Run Analysis ####
   analysisResults <- eventReactive(input$runAnalysis, {
-    req(input$dataFile)
-    data <- read.csv(input$dataFile$datapath)
+    req(processedData())
+    data <- processedData()
     
     selectedModel <- input$modelChoice
     if(selectedModel == "recommended") {
@@ -146,7 +158,8 @@ server <- function(input, output, session) {
           result$ic50 <- NA
         } else {
           result$fit <- fit
-          ed <- try(ED(fit, 50, type = "absolute"), silent = TRUE)
+          # Use type = "relative" to calculate IC50 as the midpoint between asymptotes
+          ed <- try(ED(fit, 50, type = "relative"), silent = TRUE)
           result$ic50 <- if (inherits(ed, "try-error")) NA else ed[,1]
         }
       } else if(selectedModel == "linear") {
@@ -191,7 +204,8 @@ server <- function(input, output, session) {
           result$ic50 <- NA
         } else {
           result$fit <- fit
-          ed <- try(ED(fit, 50, type = "absolute"), silent = TRUE)
+          # Use type = "relative" for a relative IC50 calculation
+          ed <- try(ED(fit, 50, type = "relative"), silent = TRUE)
           result$ic50 <- if (inherits(ed, "try-error")) NA else ed[1,1]
         }
       } else if(selectedModel == "linear") {
@@ -227,7 +241,7 @@ server <- function(input, output, session) {
         geom_point(size = 3) +
         geom_errorbar(aes(ymin = meanResponse - seResponse, ymax = meanResponse + seResponse),
                       width = 0.1) +
-        labs(title = input$plotTitle, x = input$xLabel, y = input$yLabel, color = "Group") 
+        labs(title = input$plotTitle, x = input$xLabel, y = input$yLabel, color = "Group")
       if(!is.null(res$fit)) {
         dose_seq <- seq(min(data$Dose, na.rm = TRUE), max(data$Dose, na.rm = TRUE),
                         length.out = 100)
@@ -323,9 +337,9 @@ server <- function(input, output, session) {
       req(analysisResults())
       res <- analysisResults()
       data <- res$data
-      p <- NULL  # initialize the plot object
+      p <- NULL
       
-      if ("Group" %in% names(data) && length(unique(na.omit(data$Group))) > 1) {
+      if("Group" %in% names(data) && length(unique(na.omit(data$Group))) > 1) {
         summaryData <- data %>%
           group_by(Dose, Group) %>%
           summarise(
@@ -380,7 +394,6 @@ server <- function(input, output, session) {
     }
   )
   
-  
   output$downloadData <- downloadHandler(
     filename = function() { "analysis_summary.txt" },
     content = function(file) {
@@ -406,16 +419,3 @@ server <- function(input, output, session) {
 }
 
 shinyApp(ui = ui, server = server)
-
-
-
-
-
-
-
-
-
-
-
-
-
